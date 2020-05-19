@@ -1,7 +1,8 @@
-sudo yum -y update
-sudo yum install java-1.8.0 -y
-sudo wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
-sudo rpm --import https://pkg.jenkins.io/redhat/jenkins.io.key
-sudo yum install jenkins -y
-sudo systemctl start jenkins
-sudo systemctl enable jenkins
+#!/bin/bash
+yum -y update
+yum install java-1.8.0 -y
+wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
+rpm --import https://pkg.jenkins.io/redhat/jenkins.io.key
+yum install jenkins -y
+systemctl start jenkins
+systemctl enable jenkins
