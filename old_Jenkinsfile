@@ -1,0 +1,219 @@
+// Source:
+// 		type: Github
+//		location: https://git.autodesk.com/OCTO/BidsPolygonGen
+//		branch: master
+// Plugins:
+//		- name: Workspace Cleanup
+//		- name: S3 publisher plugin
+//		  configuration: 
+//				- name: BIDS-AWS-Account
+//				  location: Configure System
+//			 	  type: Amazon S3 profile
+//			 	  description: API access credentials to S3 bucket.
+// Worker:
+//		os: windows
+//		label: [windows, git, 7zip, vs, vs2017, cuda, cuda91]
+//		Required:
+//			- name: Git
+//			  addToPath: yes
+//			- name: 7zip
+//			  addToPath: yes
+//			- name: Visual Studio
+//			  version: 2017
+//			  components:
+//				- name: .NET Framework 4 - 4.6 development tools
+//				- name: .NET framework 4.6.2
+//				- name: .NET Core 2.1
+//				- name: Windows 10 SDK (10.0.16299.0) for desktop C++
+//				- name: VC++ 2015.3 v14.00 (v140) toolset for desktop
+//				- name: ASP.NET and Web Development tools
+//			  configuration:
+//				- name: MSBuildAgent
+//				  location: Global Tool Configuration
+//				  type: MSBuild installation
+//				  path: C:\Program Files (x86)\Microsoft Visual Studio\2017\Professional\MSBuild\15.0\Bin
+//			- name: NVidia Cuda
+//			  version: 9.1
+//			  components:
+//				- name: Development
+//				- name: Runtime
+//				- name: Visual Studio Integration
+
+
+// S3 bucket for staging pipeline
+BucketPosts = "ottotestcirrus"
+
+/* Updates the online library for master branch. */
+def deploycodes3()
+{
+  bash "mkdir bundle"
+
+  // these files must be contained in the bundle        
+  bash 'cp -rf * bundle'
+
+  // zip the bundle
+  dir ("${workspace}/bundle") {
+    zip(zipFile: "../bundle.zip")
+  }
+  
+  withEnv(["VAULT_ADDR=https://vault.aws.autodesk.com"]) {
+    withCredentials([
+      usernamePassword(
+        credentialsId: '6bdd0635-1a0b-4fef-ab73-8e7148eab5f9', 
+        usernameVariable: 'USERNAME', 
+        passwordVariable: 'PASSWORD'
+      )
+    ])
+    {
+      String sResponse = bash(
+        script: """
+        vault login -method=ldap username='${USERNAME}' password='${PASSWORD}' > /dev/null
+        vault read -format=json aws-sts/des/otto/sts/Vault-Deployer 
+        """,
+        returnStdout: true
+      )
+      
+      // Uncomment for printing temporary credentials
+      // (useful for debugging)
+      // echo sResponse
+      
+      def v = readJSON text: sResponse
+      
+      String accessKey = v.data.access_key
+      String secretAccessKey = v.data.secret_key
+      String sessionToken = v.data.security_token
+
+      withEnv(
+        [
+          "AWS_ACCESS_KEY_ID=${accessKey}",
+          "AWS_SECRET_ACCESS_KEY=${secretAccessKey}",
+          "AWS_SESSION_TOKEN=${sessionToken}"
+        ]
+      )
+      {
+        // copy to the bucket
+        bat "aws s3 cp --quiet bundle.zip s3://${BucketPosts}"
+      }
+    }
+  }
+}
+
+def preCheckoutCleanup() {
+  if (isUnix()) {
+    sh "rm -rdf *"
+  } else {
+    bat script: "taskkill /IM git.exe", returnStatus: true
+    bat "del /F /Q /S * > NUL"
+  }
+}
+
+def init()
+{
+  GitCommit = buildInfo.getCommitInfo().sha
+
+  println "Git Commit: ${GitCommit}"
+      
+  if (!branchInfo.isPr) {
+    println "Not a PR branch"
+    return
+  }
+
+  println "Cancel previous builds for PR"
+  
+  cancelPreviousBuild()
+}
+
+pipeline {
+    agent none
+    parameters {
+      booleanParam(name: 'PreCheckoutCleanup', defaultValue: false, description: 'Toggle if checkout is failing')
+    }
+    options {
+      timestamps()
+      skipDefaultCheckout()
+    }
+    stages{
+      stage('Build') {
+        when {
+          anyOf {
+            branch 'master'
+            branch 'PR-*'
+          }
+        }
+        stages {
+          stage('Windows') {
+            agent {
+              node {
+                label 'windows'
+              }
+            }
+              stage ('Deploy') {
+                options {
+                  timeout(time: 30, unit: 'MINUTES')
+                }
+                when {
+                  anyOf {
+                    branch 'master'
+                  }
+                }
+                steps {
+                  deploycodes3()
+                }
+                post {
+                  success {
+                    echo "SUCCESS"
+                  }
+                }
+              }
+            }
+            post {
+              success {
+                reportBuildResult(stage: "Windows", status: "SUCCESS")
+              }
+              aborted {
+                reportBuildResult(stage: "Windows", status: "ABORTED")
+              }
+              failure {
+                reportBuildResult(stage: "Windows", status: "FAILED")
+              }
+            }
+          }
+        }
+        post {
+          always {
+            reportBuildResult(isFinal: true, commit: GitCommit)
+          }
+        }
+    }
+}
+
+pipeline {
+	agent {
+		label 'windows'
+	}
+	parameters {
+          booleanParam(name: 'PreCheckoutCleanup', defaultValue: false, description: 'Toggle if checkout is failing')
+	}
+	stages {
+		stage('Build') {
+			steps{
+				bat 'dotnet restore'
+				bat "\"${tool 'MSBuildAgent'}/msbuild.exe\" VectorizeService.sln /t:Build /p:Configuration=Release_AWS /p:Platform=x64"
+			}
+		}
+		stage('Package'){
+			steps{
+				bat 'copy x64\\Release_AWS\\cudart64_91.dll Output\\Release_AWS' 
+				bat "cd Output\\Release_AWS && 7z a bids-polygon-gen-${params.ENVIRONMENT}.zip * && cd ..\\.."
+				bat "copy Output\\Release_AWS\\bids-polygon-gen-${params.ENVIRONMENT}.zip ."
+			}
+		}
+		stage('PostBuild') {
+			steps{
+				archiveArtifacts artifacts: "bids-polygon-gen-${params.ENVIRONMENT}.zip", onlyIfSuccessful: true
+				s3Upload consoleLogLevel: 'INFO', dontWaitForConcurrentBuildCompletion: false, entries: [[bucket: "${params.BUCKET}", excludedFile: '', flatten: false, gzipFiles: false, keepForever: false, managedArtifacts: false, noUploadOnFailure: true, selectedRegion: "${params.REGION}", showDirectlyInBrowser: false, sourceFile: "bids-polygon-gen-${params.ENVIRONMENT}.zip", storageClass: 'STANDARD', uploadFromSlave: false, useServerSideEncryption: false]], pluginFailureResultConstraint: 'FAILURE', profileName: 'BIDS-AWS-Account', userMetadata: []
+				cleanWs()
+			}
+		}
+	}
+}
