@@ -78,7 +78,24 @@ def uploadartifact()
              }"""
              server.upload(uploadSpec)
          }
-     }
+}
+
+def downloadartifact()
+{
+         if ("$BRANCH_NAME" == "master") {
+             def server = Artifactory.newServer url: 'https://art-bobcat.autodesk.com/artifactory/', credentialsId: 'svc_p_ottologin'
+             def downloadSpec = """{
+                 "files": [
+                     {
+                         "pattern": "bundle.zip",
+                         "target": "downloadArtifactory/"
+                     }
+                 ]
+             }"""
+             server.download(downloadSpec)
+         }
+}
+
 
 def publishPost(String os, String pattern)
 {
@@ -142,6 +159,7 @@ pipeline {
           stages {
             stage ('Checkout') {
               steps {
+                //This command is inherited from Pipeline: SCM Step
                 checkout([$class: 'GitSCM', branches: [[name: '*/master']], doGenerateSubmoduleConfigurations: false, extensions: [], gitTool: 'Default', submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'svc_p_cirrusgitlogin', url: 'https://git.autodesk.com/dpe/cirrus_jenkin_lab.git']]]) 
               }
             }
@@ -162,10 +180,17 @@ pipeline {
                 bat 'powershell -Command  Get-ChildItem c:\\bundle'
               }
             }            
-            stage('Upload the package') {
+            stage('Upload the package to Artifactory') {
               steps {
                 uploadartifact()
               }
+            }
+
+            stage("Download Package from Artifactory"){
+              steps{
+                downloadartifact()
+              }
+                
             }        
 
             stage ('Deploy') {
